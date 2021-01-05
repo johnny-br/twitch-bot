@@ -9,7 +9,7 @@ from db_twitch_bot import DB_Bot
 
 
 """
-Salva mensagens do chat de canais da twitch.
+Script que salva mensagens do chat de canais da twitch.
 É necessário ter a autorização do seu usuário e o access token.
 O access token pode ser gerado em https://twitchapps.com/tmi/
 É possível acompanhar multiplos canais ao mesmo tempo.
@@ -17,7 +17,7 @@ O access token pode ser gerado em https://twitchapps.com/tmi/
 
 
 class Twitch_Bot:
-    def __init__(self, nick: str, access_token: str, channel: str) -> None:
+    def __init__(self, nick: str, access_token: str, channel: str):
         # token_type=bearer
         self.access_token = access_token
         self.url = "wss://irc-ws.chat.twitch.tv:443"
@@ -26,8 +26,12 @@ class Twitch_Bot:
         self.nickname = nick
         self.channel = "#" + channel
         self.db = DB_Bot(channel)
+        # se conectou com sucesso ao canal
         self._conectado = False
-        self._buffer_mensagens: List[tuple] = list()
+        # tá dando host
+        self._hosting = False
+        self._buff_mensagens: List[tuple] = list()
+        self._buff_mensagens_excluidas: List[tuple] = list()
 
         # apos x segundos de chat inativo se desconecta do canal
         self.t = 5 * 60
@@ -41,8 +45,16 @@ class Twitch_Bot:
         return self._conectado
 
     @property
+    def hosting(self) -> bool:
+        return self._hosting
+
+    @property
     def buffer_mensagens(self) -> list:
-        return self._buffer_mensagens
+        return self._buff_mensagens
+
+    @property
+    def buffer_mensagens_excluidas(self) -> list:
+        return self._buff_mensagens_excluidas
 
     @staticmethod
     async def tokenValido(access_token: str) -> bool:
@@ -69,73 +81,143 @@ class Twitch_Bot:
         else:
             self.contador += 1
 
-    def msg_info(self, msg: str) -> dict:
+    async def salvaMensagens(self) -> None:
+        await self.db.insereMensagens(self._buff_mensagens)
+        await self.db.insereMensagensExcluidas(self._buff_mensagens_excluidas)
+        self._buff_mensagens = list()
+        self._buff_mensagens_excluidas = list()
+
+    async def privmsg(self, m: str) -> None:
         try:
-            info = dict()
+            mensagem = dict()
             pattern = re.compile(
                 r"(?:^@)(.*?)(?:\s:)(.*?tv)\s(.*?)(?:\s#)(.*?)(?:\s:)(.*)"
             )
-            grupos = re.match(pattern, msg)
+            grupos = re.match(pattern, m)
 
             if grupos:
                 for _ in grupos[1].split(";"):
-                    info[_.split("=")[0]] = _.split("=")[1]
+                    mensagem[_.split("=")[0]] = _.split("=")[1]
 
-                info["command"] = grupos[3]
-                info["channel"] = grupos[4]
-                info["message"] = grupos[5]
-
-            return info
+                mensagem["command"] = grupos[3]
+                mensagem["channel"] = grupos[4]
+                mensagem["message"] = grupos[5]
 
         except Exception:
-            return {}
+            print(f"PRIVSM Exeption {Exception}")
+            # logging.error()
 
-    async def processaMensagem(self, mensagem: Union[str, bytes]) -> None:
-        if isinstance(mensagem, str):
-            if mensagem.startswith("PING"):
-                await self.envia("PONG\n")
-                print("PONG")
+        self._buff_mensagens.append(
+            (
+                mensagem["display-name"],
+                mensagem["mod"],
+                mensagem["subscriber"],
+                mensagem["tmi-sent-ts"],
+                mensagem["user-id"],
+                mensagem["user-type"],
+                mensagem["message"],
+            )
+        )
 
-            elif "PRIVMSG" in mensagem:
-                m = self.msg_info(mensagem)
-                self._buffer_mensagens.append(
-                    (
-                        m["display-name"],
-                        m["mod"],
-                        m["subscriber"],
-                        m["tmi-sent-ts"],
-                        m["user-id"],
-                        m["user-type"],
-                        m["message"],
-                    )
-                )
-                self.atualizaContador()
+        self.atualizaContador()
 
-            elif mensagem.startswith(":"):
-                if "HOSTTARGET" in mensagem:
-                    pass
+    async def sub(self, m: str) -> None:
+        pass
 
-                elif self.nickname in mensagem:
-                    if not self._conectado:
-                        self._conectado = True
-                        print(f"Conectado em {self.channel[1:].upper()}")
+    async def userNotice(self, m: str) -> None:
+        pass
 
-                elif ":tmi.twitch.tv CAP * ACK" in mensagem:
-                    pass
+    async def notice(self, m: str) -> None:
+        print(f"Notice: {m}")
 
+    async def hostTarget(self, m: str) -> None:
+        # O canal pode eventualmente parar de ser host
+        # e continuar streamando
+        await self.salvaMensagens()
+        self._hosting = True
+        print(f"Host para #{m.split()[3][1:]}\nSaindo...")
+
+    async def ping(self, m: str) -> None:
+        await self.envia("PONG\n")
+        print("PONG")
+
+    async def clearmsg(self, m: str) -> None:
+        valores = m.split(" ", 1)[0].split(";")
+        display_name = valores[0].split("=")[1]
+        tmi_sent_ts = int(valores[3].split("=")[1])
+        mensagem = m.split(":", 3)[2]
+        self._buff_mensagens_excluidas.append(
+            (display_name, tmi_sent_ts, mensagem)
+        )
+        print(f"Clearmsg: {m}")
+
+    async def clearChat(self, m: str) -> None:
+        pass
+
+    async def globalUserState(self, m: str) -> None:
+        pass
+
+    async def join(self, m: str) -> None:
+        pass
+
+    async def userState(self, m: str) -> None:
+        print(f"Conectado em {m.split()[3].upper()}")
+        self._conectado = True
+
+    async def roomState(self, m: str) -> None:
+        pass
+
+    async def processaMensagem(self, msg: str) -> None:
+
+        comandos_ignorados = [
+            "CAP",
+            "001",
+            "002",
+            "003",
+            "004",
+            "375",
+            "372",
+            "376",
+            "353",
+            "366",
+        ]
+        tabela_handlers = {
+            "PRIVMSG": self.privmsg,
+            "USERNOTICE": self.userNotice,
+            "NOTICE": self.notice,
+            "CLEARMSG": self.clearmsg,
+            "GLOBALUSERSTATE": self.globalUserState,
+            "JOIN": self.join,
+            "USERSTATE": self.userState,
+            "ROOMSTATE": self.roomState,
+            "CLEARCHAT": self.clearChat,
+            "PING": self.ping,
+            "HOSTTARGET": self.hostTarget,
+        }
+
+        mensagens = msg.split("\n")
+
+        for mensagem in mensagens:
+            if mensagem:
+                if mensagem.startswith(":"):
+                    x = mensagem.split(" ", 3)
+                    comando = x[1].upper().rstrip()
+                elif mensagem.startswith("@"):
+                    x = mensagem.split(" ", 3)
+                    comando = x[2].upper().rstrip()
+                elif mensagem.startswith("PING"):
+                    comando = "PING"
                 else:
-                    print(mensagem)
+                    print(f"Mensagem não reconhecida: {mensagem}")
+                    comando = ""
 
-            elif "ROOMSTATE" in mensagem:
-                pass
-            elif "USERNOTICE" in mensagem:
-                pass
-            elif "CLEARMSG" in mensagem:
-                pass
-            elif "CLEARCHAT" in mensagem:
-                pass
-            else:
-                print(mensagem)
+                try:
+                    await tabela_handlers[comando](mensagem)
+                except KeyError:
+                    if comando not in comandos_ignorados:
+                        print(f"Comando não reconhecido: {comando}")
+                except Exception as err:
+                    print(f"{err}")
 
     async def envia(self, mensagem: str) -> None:
         await self.ws.send(mensagem)
@@ -159,10 +241,9 @@ class Twitch_Bot:
         await self.aguardaMensagens()
 
     async def aguardaMensagens(self) -> None:
-        while True:
+        while not self.hosting:
             try:
                 reply = await asyncio.wait_for(self.ws.recv(), timeout=self.t)
-
             except (
                 asyncio.TimeoutError,
                 websockets.exceptions.ConnectionClosed,
@@ -171,17 +252,18 @@ class Twitch_Bot:
                 print(f"Erro: {err}")
                 # .close é idempotente
                 await self.ws.close()
-                print("Vou colocar essas mensagens no db ..um instantinho..")
-                await self.db.insereMensagens(self._buffer_mensagens)
+                print("Melhor colocar essas mensagens no db ...um instantinho")
+                await self.salvaMensagens()
                 break
 
             except (asyncio.exceptions.CancelledError):
                 self._conectado = False
                 print(f"CTRL+C")
                 await self.ws.close()
-                print("Vou colocar essas mensagens no db ..um instantinho..")
-                await self.db.insereMensagens(self._buffer_mensagens)
+                print("Melhor colocar essas mensagens no db ...um instantinho")
+                await self.salvaMensagens()
                 break
+                # tenta se reconectar
                 # try:
                 # 	pong = await self.ws.ping()
                 # 	await asyncio.wait_for(pong, timeout=10)
@@ -192,10 +274,9 @@ class Twitch_Bot:
                 # 	break  # inner loop
 
             # ao receber mensagem
-            await self.processaMensagem(reply)
-            if len(self._buffer_mensagens) == 100:
-                await self.db.insereMensagens(self._buffer_mensagens)
-                self._buffer_mensagens = list()
+            await self.processaMensagem(str(reply))
+            if len(self._buff_mensagens) == 100:
+                await self.salvaMensagens()
 
 
 def main() -> None:

@@ -1,0 +1,7 @@
+#!/bin/sh
+
+set -e
+
+black -l 79 *.py;
+mypy --disallow-incomplete-defs --disallow-untyped-calls --disallow-untyped-decorators --disallow-untyped-defs *.py;
+pycodestyle *.py;
